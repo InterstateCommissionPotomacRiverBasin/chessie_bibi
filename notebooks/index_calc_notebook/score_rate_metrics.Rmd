@@ -1,0 +1,148 @@
+---
+title: "Untitled"
+author: "Zachary M. Smith"
+date: "August 13, 2018"
+output: html_document
+---
+
+Import the metric scoring thresholds from the 2017 Chessie BIBI refinment.
+```{r}
+score.thresh <- data.table::fread("H:/Projects/Chessie_BIBI/report/FINAL_May25_2017/2017_Data/Metric_Thresholds/metric_thresholds.csv") %>% 
+  clean_df() %>% 
+  rowwise() %>% 
+  mutate(upper = max(ref_median, bound),
+         lower = min(ref_median, bound)) %>% 
+  ungroup()
+```
+
+A function to join the metric values with the scoring thresholds for the appropriate taxonomic level and spatial level.
+```{r}
+# taxa.res <- "family"
+# spatial.res <- "coast"
+# metrics.df <- metrics.gen
+# thresh.df <- score.thresh
+
+join_metric_thresh <- function(metrics.df, thresh.df, taxa.res, spatial.res) {
+  score.sub <- thresh.df %>% 
+  filter(taxonomic_resolution == taxa.res,
+         spatial_resolution == spatial.res)
+
+final.df <- inner_join(metrics.df, score.sub, by = "metric")
+
+scores.vec <- score.sub[!score.sub$metric %in% unique(final.df$metric), "metric"]
+if (nrow(scores.vec) > 0) warning(paste("warning: The following metrics are missing:", scores.vec$metric))
+return(final.df)
+}
+
+```
+
+Apply the `join_metri_thesh()` function.
+```{r}
+fam.coast <- join_metric_thresh(metrics.fam, score.thresh, "family", "coast")
+gen.coast <- join_metric_thresh(metrics.gen, score.thresh, "genus", "coast")
+fam.sep <- join_metric_thresh(metrics.fam, score.thresh, "family", "sep")
+gen.sep <- join_metric_thresh(metrics.gen, score.thresh, "genus", "sep")
+metrics.df <- bind_rows(fam.coast, gen.coast, fam.sep, gen.sep)
+```
+
+Scoring functions to apply the scoring thresholds to the raw metric values.
+```{r}
+dec_func <- function(upper, lower, value) {
+  dplyr::case_when(
+    value <= lower ~ 0,
+    value >= upper ~ 100,
+    value < upper &
+    value > lower ~ ((value - lower) / (upper - lower)) * 100,
+    TRUE ~ 100000
+  )
+}
+
+inc_func <- function(upper, lower, value) {
+  dplyr::case_when(
+    value <= lower ~ 100,
+    value >= upper ~ 0,
+    value < upper &
+      value > lower ~ ((upper - value) / (upper - lower)) * 100,
+    TRUE ~ 100000
+  )
+}
+
+score_func <- function(long.df, upper.thresh.col, lower.thresh.col, value.col) {
+  value.col <- rlang::enquo(value.col)
+  upper.thresh.col <- rlang::enquo(upper.thresh.col)
+  lower.thresh.col <- rlang::enquo(lower.thresh.col)
+  
+  final.df <- long.df %>% 
+    dplyr::mutate(score = case_when(
+      influence_of_disturbance == "decrease" ~ dec_func(rlang::UQ(upper.thresh.col),
+                                                        rlang::UQ(lower.thresh.col),
+                                                        rlang::UQ(value.col)),
+      influence_of_disturbance == "increase" ~ inc_func(rlang::UQ(upper.thresh.col),
+                                                        rlang::UQ(lower.thresh.col),
+                                                        rlang::UQ(value.col)),
+      TRUE ~ -100000))
+  
+  return(final.df)
+}
+```
+
+Score the raw metric values.
+```{r}
+scores.df <- score_func(metrics.df, upper, lower, value)
+```
+
+Calculate the IBI scores by finding the mean metric score for each sampling event.
+```{r}
+ibi.df <- scores.df %>% 
+  group_by(unique_id, spatial_resolution, taxonomic_resolution) %>% 
+  summarize(score = mean(score)) %>% 
+  ungroup() 
+```
+
+Import the rating thresholds for each taxonomic resolution and spatial resolution.
+```{r}
+rating.thresh <- data.table::fread("H:/Projects/Chessie_BIBI/report/FINAL_May25_2017/2017_Data/Rating_Thresholds/rating_threshold_06292017.csv", data.table = FALSE)
+```
+
+Place the index scores into coarse rating bins and export the table.
+```{r}
+rating.df <- left_join(ibi.df, rating.thresh, by = c("spatial_resolution", "taxonomic_resolution")) %>% 
+  mutate(rating = case_when(
+    score < half_ref_10 ~ "very_poor",
+    score >= half_ref_10 & score < ref_10 ~ "poor",
+    score >= ref_10 & score < ref_25 ~ "fair",
+    score >= ref_25 & score < ref_50 ~ "good",
+    score >= ref_50 ~ "excellent",
+    TRUE ~ "ERROR"
+  )) %>% 
+  select(-half_ref_10:-ref_50) %>% 
+  mutate(resolution = paste(spatial_resolution, taxonomic_resolution, sep = "_")) %>% 
+  select(-spatial_resolution, -taxonomic_resolution) %>% 
+  arrange(resolution)
+```
+
+Compare the ratings from each index with stacked barplots.
+```{r}
+test <- rating.df %>% 
+  group_by(resolution) %>% 
+  mutate(total = n()) %>% 
+  group_by(resolution, rating, total) %>% 
+  summarize(count = n()) %>% 
+  ungroup() %>% 
+  mutate(percent = count / total * 100,
+         rating = factor(rating, levels = c("excellent", "good", "fair",
+                                            "poor", "very_poor"))) %>% 
+  arrange(resolution, rating)
+
+g.plot <- ggplot(test) + 
+  geom_bar(aes(y = percent, x = resolution, fill = rating), data = test,
+                           stat="identity") +
+  scale_fill_manual(name = "rating",
+                    labels = c("excellent", "good", "fair", "poor", "very_poor"),
+                    values = c("excellent" = "darkgreen",
+                               "good" = "green3",
+                               "fair" = "yellow2",
+                               "poor" = "orange2",
+                               "very_poor" = "red3"))
+g.plot
+```

@@ -1,0 +1,89 @@
+---
+title: "Untitled"
+author: "Zachary M. Smith"
+date: "July 6, 2018"
+output: html_document
+---
+
+```{r message=FALSE}
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(mmir)
+library(toolbox)
+library(bibi2.0)
+data("hier.fwmi")
+data("attributes.fwmi")
+```
+
+```{r}
+master <- Benthos::master %>% 
+  toolbox::prep_df() %>% 
+  select(tsn_final, tsn_agency_id, phylum:species,
+         aspt, bibi_tv, bibi_ffg, bibi_habit) %>% 
+  distinct() %>% 
+  mutate(bibi_ffg = case_when(
+    is.na(bibi_ffg) | bibi_ffg == "" ~ as.character(NA),
+    bibi_ffg == "cg" ~ "gather",
+    bibi_ffg == "pr" ~ "predator",
+    bibi_ffg == "sc" ~ "scrape",
+    bibi_ffg == "cf" ~ "filter",
+    bibi_ffg == "sh" ~ "shred",
+    bibi_ffg == "om" ~ "omnivore",
+    bibi_ffg == "pa" ~ "parasite",
+    bibi_ffg %in% c("pc", "pi") ~ "pierce",
+    TRUE ~ "ERROR"
+  ),
+  bibi_habit = case_when(
+    is.na(bibi_habit) | bibi_habit == "" ~ as.character(NA),
+    bibi_habit == "sp" ~ "sprawl",
+    bibi_habit == "cn" ~ "cling",
+    bibi_habit == "cb" ~ "climb",
+    bibi_habit == "bu" ~ "burrow",
+    bibi_habit == "sw" ~ "swim",
+    bibi_habit == "sk" ~ "skate",
+    TRUE ~ "ERROR"
+  ),
+  tsn_agency_id = as.character(tsn_agency_id)
+  ) %>% 
+  rename(ffg = "bibi_ffg",
+         habit = "bibi_habit",
+         tol_val = "bibi_tv") %>% 
+  fill_taxa(tsn_final, phylum:family)
+```
+
+```{r}
+channel <- RODBC::odbcConnect("CBIBI_2017")
+
+tab.vec <- c("TAB_EVENT", "TAB_STATIONS", "TAB_TAXONOMIC_COUNT")
+
+tab.list <- purrr::map(tab.vec, function(tab.i) {
+  RODBC::sqlFetch(channel, tab.i, stringsAsFactors = FALSE) %>% 
+    toolbox::prep_df()
+}) %>% 
+  set_names(tolower(tab.vec))
+
+RODBC::odbcCloseAll()
+```
+
+```{r}
+taxa.df <- suppressMessages(
+  purrr::reduce(tab.list, full_join)
+)
+```
+
+```{r}
+taxa.df <- taxa.df %>% 
+  prep_method() %>% 
+  prep_dups()
+```
+
+```{r}
+taxa.df2 <- left_join(taxa.df, master, by = c("tsn_final" = "tsn_agency_id")) %>% 
+  prep_taxa()
+```
+
+```{r}
+test <- bio_fam_metrics(taxa.df2)
+```
+

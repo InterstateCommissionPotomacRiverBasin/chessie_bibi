@@ -1,0 +1,134 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r message=FALSE}
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(mmir)
+library(toolbox)
+library(bibi2.0)
+
+data("hier.fwmi")
+data("attributes.fwmi")
+```
+
+```{r}
+master <- Benthos::master %>% 
+  toolbox::prep_df() %>% 
+  select(tsn_final, tsn_agency_id, phylum:species,
+         aspt, bibi_tv, bibi_ffg, bibi_habit) %>% 
+  distinct() %>% 
+  mutate(bibi_ffg = case_when(
+    is.na(bibi_ffg) | bibi_ffg == "" ~ as.character(NA),
+    bibi_ffg == "cg" ~ "gather",
+    bibi_ffg == "pr" ~ "predator",
+    bibi_ffg == "sc" ~ "scrape",
+    bibi_ffg == "cf" ~ "filter",
+    bibi_ffg == "sh" ~ "shred",
+    bibi_ffg == "om" ~ "omnivore",
+    bibi_ffg == "pa" ~ "parasite",
+    bibi_ffg %in% c("pc", "pi") ~ "pierce",
+    TRUE ~ "ERROR"
+  ),
+  bibi_habit = case_when(
+    is.na(bibi_habit) | bibi_habit == "" ~ as.character(NA),
+    bibi_habit == "sp" ~ "sprawl",
+    bibi_habit == "cn" ~ "cling",
+    bibi_habit == "cb" ~ "climb",
+    bibi_habit == "bu" ~ "burrow",
+    bibi_habit == "sw" ~ "swim",
+    bibi_habit == "sk" ~ "skate",
+    TRUE ~ "ERROR"
+  )
+  )
+```
+
+
+```{r}
+channel <- RODBC::odbcConnect("CBIBI_2017")
+
+tab.vec <- c("TAB_EVENT", "TAB_STATIONS", "TAB_PROJECT",
+             "TAB_WQ_DATA", "TAB_PARAMETER_WQ", "TAB_HABITAT_ASSESSMENT",
+             "TAB_HABITAT_PARAMETERS", "TAB_TAXONOMIC_COUNT",
+             "TAB_HUC_12", "TAB_PROGRAM")
+
+tab.list <- purrr::map(tab.vec, function(tab.i) {
+  RODBC::sqlFetch(channel, tab.i, stringsAsFactors = FALSE) %>% 
+    toolbox::prep_df()
+}) %>% 
+  set_names(tolower(tab.vec))
+
+RODBC::odbcCloseAll()
+```
+
+```{r}
+tab.list$tab_taxonomic_count <- tab.list$tab_taxonomic_count %>% 
+  dplyr::mutate(tsn_final = str_replace_all(tsn_final, "(?<![0-9])0+", "")) %>% 
+  dplyr::left_join(hier.fwmi, by = "tsn_final") %>% 
+  bibi2.0::prep_taxa()
+```
+
+```{r cache=TRUE}
+prep.df <- prep_data(tab.list$tab_taxonomic_count,
+                     tab.list$tab_wq_data,
+                     tab.list$tab_habitat_assessment,
+                     tab.list$tab_event,
+                     tab.list$tab_stations,
+                     tab.list$tab_project,
+                     tab.list$tab_huc_12,
+                     agg_sample_num = TRUE,
+                     development = TRUE)
+
+rm(tab.list)
+```
+
+```{r cache=TRUE}
+site.class.df <- site_classification(prep.df)
+```
+
+
+```{r cache=TRUE}
+taxa.df <- site.class.df %>% 
+  ungroup() %>% 
+  select(unique_id, category, icprb_bioregion_id, reporting_value,
+         final_id, 
+         phylum, subphylum, class, subclass,
+         order, suborder, family, subfamily, tribe, genus) %>% 
+  group_by_at(vars(-reporting_value)) %>% 
+  summarize(reporting_value = sum(reporting_value)) %>% 
+  ungroup() %>% 
+  fill_taxa(final_id, phylum:genus) %>% 
+  mutate(final_id = genus) %>% 
+  group_by_at(vars(-reporting_value)) %>% 
+  summarize(reporting_value = sum(reporting_value)) %>% 
+  ungroup()
+
+
+```
+
+```{r cache=TRUE}
+taxa.df <- prob_rarefaction(taxa.df, unique_id, reporting_value, genus, 100)
+```
+
+```{r cache=TRUE}
+taxa.dev <- taxa.df %>% 
+  filter(category %in% c("ref", "deg"))
+
+metrics.df <- taxa.dev %>% 
+  select(unique_id, category, icprb_bioregion_id) %>% 
+  distinct()
+
+metrics.df <- taxa_seq_parallel(taxa.dev, unique_id, reporting_value,
+                                "order", "genus",
+                                job = "pct") %>% 
+  bind_cols(metrics.df)
+```
+
+```{r}
+
+data.table::fwrite(metrics.df, "temp_metrics.csv")
+```
+
